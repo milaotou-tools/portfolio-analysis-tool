@@ -24,10 +24,9 @@ npm run start
 复制 `.env.example` 为 `.env.local`：
 
 ```env
-AI_API_KEY=your_server_side_key
-AI_API_URL=https://api.openai.com/v1/chat/completions
-AI_MODEL=gpt-4o-mini
-AI_PROVIDER=openai
+AI_API_KEY=
+AI_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+AI_MODEL=qwen-plus
 ```
 
 ---

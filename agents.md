@@ -48,10 +48,10 @@ vercel deploy --prod
 需要的变量：
 
 ```env
-AI_API_KEY=服务端模型 API Key
-AI_API_URL=模型接口地址
-AI_MODEL=模型名
-AI_PROVIDER=openai 或 anthropic
+AI_API_KEY=阿里云百炼 API Key
+AI_BASE_URL=模型接口地址（默认 DashScope 兼容接口）
+AI_MODEL=模型名（默认 qwen-plus）
+AI_PROVIDER=openai 或 anthropic（可选，默认 openai）
 ```
 
 注意：
@@ -59,8 +59,9 @@ AI_PROVIDER=openai 或 anthropic
 - 不要把真实 `AI_API_KEY` 写入文档、日志、提交信息或源码。
 - `.env.local` 只用于本地。
 - 线上必须在 Vercel 后台的 Environment Variables 里配置，并重新部署后才会生效。
-- `AI_PROVIDER=openai` 表示使用 OpenAI-compatible 调用格式，适用于 OpenAI、DashScope compatible mode、很多中转站等。
-- `AI_PROVIDER=anthropic` 表示使用 Anthropic messages 调用格式。
+- 默认使用阿里云百炼 DashScope 的 OpenAI 兼容接口（`/compatible-mode/v1`）。
+- `AI_PROVIDER` 默认 `openai`，适用于所有 OpenAI-compatible 服务（DashScope、OpenAI、中转站等）。
+- `AI_PROVIDER=anthropic` 切换为 Anthropic messages 调用格式。
 
 ## 主要目录与文件
 
@@ -215,7 +216,7 @@ codex/竖构图探索
 远端仓库：
 
 ```txt
-https://github.com/milaotou001/portfolio-analyzer-v12.git
+https://github.com/milaotou001/portfolio-analysis-tool.git
 ```
 
 临时生成过两张视觉示意图：

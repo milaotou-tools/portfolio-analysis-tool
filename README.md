@@ -16,10 +16,9 @@ npm run dev
 复制 `.env.example` 为 `.env.local`，并配置服务端变量：
 
 ```bash
-AI_API_KEY=your_server_side_key
-AI_API_URL=https://api.openai.com/v1/chat/completions
-AI_MODEL=gpt-4o-mini
-AI_PROVIDER=openai
+AI_API_KEY=你的阿里云百炼 API Key
+AI_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+AI_MODEL=qwen-plus
 ```
 
 这些变量只在 Next.js 后端 Route Handler 中读取，不会暴露到浏览器。
@@ -34,15 +33,14 @@ AI_PROVIDER=openai
 4. 在 Project Settings -> Environment Variables 中添加：
 
 ```txt
-AI_API_KEY=你的服务端 API Key
-AI_API_URL=https://api.openai.com/v1/chat/completions
-AI_MODEL=gpt-4o-mini
-AI_PROVIDER=openai
+AI_API_KEY=你的阿里云百炼 API Key
+AI_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+AI_MODEL=qwen-plus
 ```
 
 5. 保存后重新部署。浏览器端不会拿到 `AI_API_KEY`，截图只会上传到 `/api/parse-holdings` 进行本次解析。
 
-如果使用 OpenAI 兼容中转站，保持 `AI_PROVIDER=openai`，把 `AI_API_URL` 改成中转站的 base URL 或 chat completions URL 即可。如果使用 Anthropic，把 `AI_PROVIDER` 改成 `anthropic`，并配置对应的 `AI_API_URL` 和模型名。
+默认使用阿里云百炼 DashScope（OpenAI 兼容接口）。如需使用其他 OpenAI 兼容服务，修改 `AI_BASE_URL` 即可。如需使用 Anthropic，设置 `AI_PROVIDER=anthropic` 并配置对应的 `AI_BASE_URL` 和模型名。
 
 ## 主要结构
 

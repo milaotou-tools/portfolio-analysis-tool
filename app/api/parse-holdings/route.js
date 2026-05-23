@@ -62,9 +62,9 @@ function normalizeImageContentType(file) {
 
 async function callVisionModel(file) {
   const apiKey = process.env.AI_API_KEY;
-  const model = process.env.AI_MODEL || "gpt-4o-mini";
-  const apiUrl = process.env.AI_API_URL || "https://api.openai.com/v1/chat/completions";
-  const provider = (process.env.AI_PROVIDER || (apiUrl.includes("anthropic") ? "anthropic" : "openai")).toLowerCase();
+  const model = process.env.AI_MODEL || "qwen-plus";
+  const apiUrl = process.env.AI_BASE_URL || "https://dashscope.aliyuncs.com/compatible-mode/v1";
+  const provider = (process.env.AI_PROVIDER || "openai").toLowerCase();
 
   if (!apiKey) {
     const error = new Error("服务端未配置 AI_API_KEY。请在 Vercel 环境变量中配置后重新部署。");
