@@ -4,6 +4,15 @@ export const maxDuration = 60;
 
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 
+const IRRELEVANT_FIELDS = [
+  "icloudNoNotificationsEnabled",
+  "icloudNoPushNotificationsEnabled",
+  "icloudNoAutoUpdateEnabled",
+  "icloudNoBackgroundAppRefreshEnabled",
+  "icloudNoDarkModeEnabled",
+  "icloudNoThemeType"
+];
+
 export async function POST(request) {
   try {
     const formData = await request.formData();
@@ -103,6 +112,13 @@ async function callVisionModel(file) {
     "1. 只输出一行合法的 JSON，不要输出任何解释、问候语、Markdown、``` 或注释。",
     "2. 不要用 ```json 包裹，只输出裸 JSON。",
     "3. 不确定的字段填 null 或空字符串 \"\"，不要编造。",
+    "4. 只输出 holdings 和 warnings 两个顶层字段，绝对不要输出其他字段。",
+    "",
+    "## 绝对禁止输出的字段（一旦出现就算违规）",
+    "禁止输出任何与系统设置、通知、主题、自动更新、后台刷新、暗黑模式、iCloud 相关的字段，",
+    "包括但不限于：icloudNoNotificationsEnabled, icloudNoPushNotificationsEnabled,",
+    "icloudNoAutoUpdateEnabled, icloudNoBackgroundAppRefreshEnabled,",
+    "icloudNoDarkModeEnabled, icloudNoThemeType。",
     "",
     "## JSON 结构（固定）",
     "{",
@@ -114,18 +130,10 @@ async function callVisionModel(file) {
     '      "assetClass": "股票 | ETF | 黄金 | 商品 | 现金 | 债券 | 其他",',
     '      "sector": "贵金属 | 石油 | 宽指 | 科技 | 金融 | 消费 | 其他",',
     '      "marketValue": 持仓市值（数字，单位元或美元，不要带千分位逗号。不知道填 null）',
-    '      "cost": 成本价（数字。不知道填 null）',
-    '      "price": 现价（数字。不知道填 null）',
     '      "weightPct": 仓位占比百分数（数字，如 12.3。不知道填 null）',
     '      "pnlPct": 盈亏百分比（数字，如 -1.2。不知道填 null）',
     "    }",
     "  ],",
-    '  "summary": {',
-    '    "overview": "一句话概述组合特征",',
-    '    "totalPositions": 持仓数量,',
-    '    "topHolding": "第一大持仓名称",',
-    '    "estimatedPnlPct": 组合估算盈亏百分比或 null',
-    "  },",
     '  "warnings": ["不确定的字段说明，无则为空数组"]',
     "}",
     "",
@@ -134,13 +142,28 @@ async function callVisionModel(file) {
     "- 持仓金额填 marketValue，持仓占比填 weightPct，盈亏比例填 pnlPct。",
     "- 如果截图里某字段看不清，填 null 或 \"\"，并在 warnings 中说明。",
     "- 如果某条记录完全无法识别，就不要放入 holdings。",
+    "- 不要输出 summary、cost、price 等字段，这些不需要你生成。",
     ""
   ].join("\n");
 
-  if (provider === "anthropic") {
-    return callAnthropic(apiUrl, apiKey, model, file.contentType, base64, prompt);
+  try {
+    const result = provider === "anthropic"
+      ? await callAnthropic(apiUrl, apiKey, model, file.contentType, base64, prompt)
+      : await callOpenAICompatible(apiUrl, apiKey, model, file.contentType, base64, prompt);
+    return result;
+  } catch (error) {
+    if (error.statusCode === 422 && error.rawFull) {
+      log("首次解析失败，尝试 JSON 修复", error.parseError || "");
+      try {
+        const repaired = await repairJson(error.rawFull, apiUrl, apiKey, model, provider);
+        log("JSON 修复成功", "");
+        return repaired;
+      } catch (repairError) {
+        log("JSON 修复也失败了", repairError.message);
+      }
+    }
+    throw error;
   }
-  return callOpenAICompatible(apiUrl, apiKey, model, file.contentType, base64, prompt);
 }
 
 async function callOpenAICompatible(apiUrl, apiKey, model, mime, base64, prompt) {
@@ -175,27 +198,32 @@ async function callOpenAICompatible(apiUrl, apiKey, model, mime, base64, prompt)
   };
 
   let resp, data;
-  try {
-    const result = await doFetch();
-    resp = result.resp;
-    data = result.data;
-  } catch (firstError) {
-    log("首次请求失败", firstError.message);
-    log("首次请求 cause", firstError.cause?.message || "(none)");
-    await new Promise(r => setTimeout(r, 800));
+  let lastError;
+
+  for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const result = await doFetch();
       resp = result.resp;
       data = result.data;
-      log("重试成功", `status=${resp.status}`);
-    } catch (secondError) {
-      log("重试仍失败", secondError.message);
-      const error = new Error("AI 服务连接失败");
-      error.statusCode = 502;
-      error.detail = secondError.message;
-      error.causeDetail = secondError.cause?.message || "";
-      throw error;
+      lastError = null;
+      break;
+    } catch (err) {
+      lastError = err;
+      log(`第${attempt + 1}次请求失败`, err.message);
+      if (attempt < 2) {
+        const delay = attempt === 0 ? 800 : 1500;
+        await new Promise(r => setTimeout(r, delay));
+      }
     }
+  }
+
+  if (lastError) {
+    log("3次请求均失败", lastError.message);
+    const error = new Error("AI 服务连接失败");
+    error.statusCode = 502;
+    error.detail = lastError.message;
+    error.causeDetail = lastError.cause?.message || "";
+    throw error;
   }
 
   log("DashScope HTTP status", String(resp.status));
@@ -250,25 +278,32 @@ async function callAnthropic(apiUrl, apiKey, model, mime, base64, prompt) {
   };
 
   let resp, data;
-  try {
-    const result = await doFetch();
-    resp = result.resp;
-    data = result.data;
-  } catch (firstError) {
-    log("首次请求失败 (Anthropic)", firstError.message);
-    await new Promise(r => setTimeout(r, 800));
+  let lastError;
+
+  for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const result = await doFetch();
       resp = result.resp;
       data = result.data;
-    } catch (secondError) {
-      log("重试仍失败 (Anthropic)", secondError.message);
-      const error = new Error("AI 服务连接失败");
-      error.statusCode = 502;
-      error.detail = secondError.message;
-      error.causeDetail = secondError.cause?.message || "";
-      throw error;
+      lastError = null;
+      break;
+    } catch (err) {
+      lastError = err;
+      log(`第${attempt + 1}次请求失败 (Anthropic)`, err.message);
+      if (attempt < 2) {
+        const delay = attempt === 0 ? 800 : 1500;
+        await new Promise(r => setTimeout(r, delay));
+      }
     }
+  }
+
+  if (lastError) {
+    log("3次请求均失败 (Anthropic)", lastError.message);
+    const error = new Error("AI 服务连接失败");
+    error.statusCode = 502;
+    error.detail = lastError.message;
+    error.causeDetail = lastError.cause?.message || "";
+    throw error;
   }
 
   log("Anthropic HTTP status", String(resp.status));
@@ -303,12 +338,69 @@ function normalizeAnthropicEndpoint(url) {
   return `${trimmed}/v1/messages`;
 }
 
+async function repairJson(rawContent, apiUrl, apiKey, model, provider) {
+  log("修复请求", "开始发送 JSON 修复请求");
+
+  const repairPrompt = "请把下面内容修复为合法 JSON，只保留 holdings 和 warnings 字段，删除任何无关字段，不要补充解释。\n\n" + String(rawContent).slice(0, 8000);
+
+  if (provider === "anthropic") {
+    const url = normalizeAnthropicEndpoint(apiUrl);
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: {
+        "x-api-key": apiKey,
+        "anthropic-version": process.env.ANTHROPIC_VERSION || "2023-06-01",
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: 4096,
+        messages: [{ role: "user", content: repairPrompt }]
+      })
+    });
+    const data = await resp.json().catch(() => ({}));
+    log("修复 Anthropic HTTP status", String(resp.status));
+    if (!resp.ok) {
+      throw new Error(data.error?.message || `修复请求失败 ${resp.status}`);
+    }
+    const text = Array.isArray(data.content) ? data.content.map(p => p.text || "").join("\n") : "";
+    log("修复 content 前500字 (Anthropic)", String(text || "").slice(0, 500));
+    return extractJson(text, data.stop_reason || "unknown");
+  }
+
+  const url = normalizeOpenAIEndpoint(apiUrl);
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: {
+      "authorization": `Bearer ${apiKey}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      model,
+      temperature: 0,
+      max_tokens: 4096,
+      response_format: { type: "json_object" },
+      messages: [{ role: "user", content: repairPrompt }]
+    })
+  });
+  const data = await resp.json().catch(() => ({}));
+  log("修复 OpenAI HTTP status", String(resp.status));
+  if (!resp.ok) {
+    throw new Error(data.error?.message || `修复请求失败 ${resp.status}`);
+  }
+  const choice = data.choices?.[0];
+  const content = choice?.message?.content || "";
+  log("修复 content 前500字 (OpenAI)", String(content || "").slice(0, 500));
+  return extractJson(content, choice?.finish_reason || "unknown");
+}
+
 function extractJson(text, finishReason) {
   if (!text) {
     const error = new Error("模型返回内容无法解析为完整 JSON");
     error.statusCode = 422;
     error.rawPreview = "(空内容)";
     error.rawTail = "(空)";
+    error.rawFull = "(空)";
     error.parseError = "content 为空";
     error.finishReason = finishReason || "unknown";
     throw error;
@@ -331,6 +423,7 @@ function extractJson(text, finishReason) {
     error.statusCode = 422;
     error.rawPreview = raw.slice(0, 500);
     error.rawTail = raw.slice(-500);
+    error.rawFull = raw;
     error.parseError = "内容中没有找到 {";
     error.finishReason = finishReason || "unknown";
     throw error;
@@ -377,6 +470,7 @@ function extractJson(text, finishReason) {
     error.statusCode = 422;
     error.rawPreview = raw.slice(0, 500);
     error.rawTail = raw.slice(-500);
+    error.rawFull = raw;
     error.parseError = truncated
       ? `finish_reason=${finishReason}，JSON 括号未闭合（开 ${depth} 层）`
       : `JSON 括号未闭合（开 ${depth} 层）`;
@@ -397,6 +491,7 @@ function extractJson(text, finishReason) {
     error.statusCode = 422;
     error.rawPreview = raw.slice(0, 500);
     error.rawTail = raw.slice(-500);
+    error.rawFull = raw;
     error.parseError = parseErr.message || "JSON.parse 失败";
     error.finishReason = finishReason || "unknown";
     throw error;
@@ -406,7 +501,20 @@ function extractJson(text, finishReason) {
   return parsed;
 }
 
+function stripIrrelevantFields(parsed) {
+  if (!parsed || typeof parsed !== "object") return parsed;
+  for (const key of Object.keys(parsed)) {
+    if (IRRELEVANT_FIELDS.includes(key) || /^icloud/i.test(key)) {
+      delete parsed[key];
+      log("stripIrrelevantFields", `已删除无关字段: ${key}`);
+    }
+  }
+  return parsed;
+}
+
 function sanitizeResult(raw) {
+  stripIrrelevantFields(raw);
+
   const holdings = Array.isArray(raw && raw.holdings) ? raw.holdings : [];
   const validationWarnings = [];
   const safeHoldings = holdings
@@ -425,16 +533,11 @@ function sanitizeResult(raw) {
         sector: stripText(item.sector || item.market || "其他", 20),
         weightPct: clampNumber(item.weightPct ?? item.pct ?? item.weight_pct ?? item.positionPct, 0, 100),
         pnlPct: clampNumber(item.pnlPct ?? item.change ?? item.pnl_pct ?? item.profitPct, -1000, 1000),
-        marketValue: safeNumber(item.marketValue),
-        cost: safeNumber(item.cost),
-        price: safeNumber(item.price)
+        marketValue: safeNumber(item.marketValue)
       };
     })
     .filter(item => (item.name && item.name !== "未命名") || item.code)
     .slice(0, 50);
-
-  const summary = raw && raw.summary && typeof raw.summary === "object" ? raw.summary : {};
-  const estimatedPnl = Number(summary.estimatedPnlPct);
 
   if (validationWarnings.length) {
     log("字段验证 warnings", validationWarnings.join("; "));
@@ -446,13 +549,21 @@ function sanitizeResult(raw) {
   return {
     holdings: safeHoldings,
     summary: {
-      overview: stripText(summary.overview || "", 160),
-      totalPositions: Number(summary.totalPositions) || safeHoldings.length,
-      topHolding: stripText(summary.topHolding || (safeHoldings[0] && safeHoldings[0].name) || "", 40),
-      estimatedPnlPct: Number.isFinite(estimatedPnl) ? estimatedPnl : estimatePnl(safeHoldings)
+      overview: buildSummaryOverview(safeHoldings),
+      totalPositions: safeHoldings.length,
+      topHolding: safeHoldings[0]?.name || "",
+      estimatedPnlPct: estimatePnl(safeHoldings)
     },
     warnings: mergedWarnings
   };
+}
+
+function buildSummaryOverview(holdings) {
+  if (!holdings.length) return "未识别到持仓";
+  const top = holdings[0];
+  const pnl = estimatePnl(holdings);
+  const direction = pnl >= 0 ? "盈利" : "回撤";
+  return `${top.name} 为第一大持仓，共 ${holdings.length} 个标的，组合估算${direction} ${Math.abs(pnl).toFixed(2)}%。`;
 }
 
 function safeNumber(value) {
