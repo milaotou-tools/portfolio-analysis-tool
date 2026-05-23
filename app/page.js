@@ -24,6 +24,7 @@ export default function HomePage() {
   const [viewportMode, setViewportMode] = useState("desktop");
   const [parseStatus, setParseStatus] = useState("");
   const [toast, setToast] = useState(null);
+  const [debugInfo, setDebugInfo] = useState(null);
   const chartRef = useRef(null);
   const canvasRef = useRef(null);
 
@@ -165,11 +166,18 @@ export default function HomePage() {
   function receiveResult(raw, demo = false) {
     const normalized = normalizeResult(raw);
     if (!normalized.holdings.length) {
-      notify("没有识别到持仓，请换一张更清晰的截图。", "err");
+      setParseStatus("接口已返回，但未识别到可生成图表的持仓数据");
+      setDebugInfo({
+        topKeys: Object.keys(raw || {}).join(", ") || "(无)",
+        holdingsCount: String(normalized.holdings.length),
+        rawPreview: JSON.stringify(raw || {}).slice(0, 500)
+      });
+      notify("未识别到持仓数据，请换一张更清晰的截图。", "err");
       return;
     }
     setResult(normalized);
     setIsDemo(demo);
+    setDebugInfo(null);
     setParseStatus("");
     setPage("result");
   }
@@ -181,6 +189,7 @@ export default function HomePage() {
       return;
     }
 
+    setDebugInfo(null);
     setIsParsing(true);
     setParseStatus("正在上传截图并调用视觉模型，请稍等。");
     clientLog("page.parse.start", fileLogDetail(nextFile));
@@ -190,7 +199,16 @@ export default function HomePage() {
       const resp = await fetch("/api/parse-holdings", { method: "POST", body: form });
       const data = await resp.json().catch(() => ({}));
       clientLog("page.parse.response", { ok: resp.ok, status: String(resp.status) });
-      if (!resp.ok) throw new Error(data.error || `解析失败 (${resp.status})`);
+      if (!resp.ok) {
+        let msg = data.error || `解析失败 (${resp.status})`;
+        if (data.detail) msg += ` — ${data.detail}`;
+        if (data.cause) msg += ` (${data.cause})`;
+        if (data.rawPreview) {
+          msg += " | 模型原始输出见下方调试信息";
+          setDebugInfo({ topKeys: "(解析失败)", holdingsCount: "0", rawPreview: data.rawPreview });
+        }
+        throw new Error(msg);
+      }
       setParseStatus("模型已返回结果，正在生成持仓图。");
       receiveResult(data, false);
       notify("解析完成", "ok");
@@ -221,18 +239,31 @@ export default function HomePage() {
 
       <main className="shell">
         {page === "upload" && (
-          <UploadPanel
-            file={file}
-            previewUrl={previewUrl}
-            isParsing={isParsing}
-            onFile={handleFile}
-            onParse={parseScreenshot}
-            parseStatus={parseStatus}
-            onDemo={() => {
-              receiveResult(DEMO_RESULT, true);
-              notify("已加载示例结果", "ok");
-            }}
-          />
+          <>
+            <UploadPanel
+              file={file}
+              previewUrl={previewUrl}
+              isParsing={isParsing}
+              onFile={handleFile}
+              onParse={parseScreenshot}
+              parseStatus={parseStatus}
+              onDemo={() => {
+                receiveResult(DEMO_RESULT, true);
+                notify("已加载示例结果", "ok");
+              }}
+            />
+            {debugInfo && (
+              <div className="card" style={{ marginTop: 14 }}>
+                <div className="card-title">调试信息（仅开发环境可见）</div>
+                <div style={{ fontSize: 12, color: "#8b949e", display: "grid", gap: 6 }}>
+                  <div>response 顶层字段：{debugInfo.topKeys}</div>
+                  <div>holdings 数量：{debugInfo.holdingsCount}</div>
+                  <div>原始输出（前500字）：</div>
+                  <pre style={{ background: "#161b22", padding: 10, borderRadius: 6, fontSize: 11, color: "#e6edf3", overflow: "auto", maxHeight: 200, whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{debugInfo.rawPreview}</pre>
+                </div>
+              </div>
+            )}
+          </>
         )}
 
         {page === "result" && (
