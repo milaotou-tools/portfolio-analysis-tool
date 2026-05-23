@@ -106,7 +106,7 @@ async function callVisionModel(file) {
   log("AI_PROVIDER", provider);
 
   if (!apiKey) {
-    const error = new Error("服务端未配置 AI_API_KEY。请在 Vercel 环境变量中配置后重新部署。");
+    const error = new Error("服务端未配置 AI_API_KEY。请在服务器环境变量中配置 AI_API_KEY 后重新部署。");
     error.statusCode = 500;
     throw error;
   }
