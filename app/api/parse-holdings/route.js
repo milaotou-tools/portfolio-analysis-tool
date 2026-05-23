@@ -31,6 +31,9 @@ export async function POST(request) {
     const status = error.statusCode || 500;
     const body = { error: error.message || "解析失败，请稍后再试。" };
     if (error.rawPreview) body.rawPreview = error.rawPreview;
+    if (error.rawTail) body.rawTail = error.rawTail;
+    if (error.parseError) body.parseError = error.parseError;
+    if (error.finishReason) body.finishReason = error.finishReason;
     if (error.detail) body.detail = error.detail;
     if (error.causeDetail) body.cause = error.causeDetail;
     return json(body, status);
@@ -95,11 +98,43 @@ async function callVisionModel(file) {
   const base64 = file.buffer.toString("base64");
   const prompt = [
     "你是一个股票持仓截图 OCR 和结构化解析器。",
-    "只从截图中提取可见持仓信息，不要编造金额、账号或券商。",
-    "返回严格 JSON 对象，格式为：",
-    '{"holdings":[{"name":"股票名称","code":"代码","weightPct":12.3,"pnlPct":-1.2,"sector":"行业或市场"}],"summary":{"overview":"一句中文概览","totalPositions":3,"topHolding":"名称","estimatedPnlPct":0.3},"warnings":["无法确认的信息"]}',
-    "weightPct 是仓位占比百分数；pnlPct 是盈亏或当日涨跌百分数。如果截图没有明确字段，用 0 并在 warnings 中说明。",
-    "不要返回账号、手机号、券商名称、完整金额、原始截图内容或 Markdown。"
+    "",
+    "## 输出规则（必须严格遵守）",
+    "1. 只输出一行合法的 JSON，不要输出任何解释、问候语、Markdown、``` 或注释。",
+    "2. 不要用 ```json 包裹，只输出裸 JSON。",
+    "3. 不确定的字段填 null 或空字符串 \"\"，不要编造。",
+    "",
+    "## JSON 结构（固定）",
+    "{",
+    '  "holdings": [',
+    "    {",
+    '      "name": "证券名称",',
+    '      "code": "证券代码，如 600000、AAPL。绝对不能填金额、市值。识别不到则填 \"\"",',
+    '      "market": "A股 | 港股 | 美股 | 其他",',
+    '      "assetClass": "股票 | ETF | 黄金 | 商品 | 现金 | 债券 | 其他",',
+    '      "sector": "贵金属 | 石油 | 宽指 | 科技 | 金融 | 消费 | 其他",',
+    '      "marketValue": 持仓市值（数字，单位元或美元，不要带千分位逗号。不知道填 null）',
+    '      "cost": 成本价（数字。不知道填 null）',
+    '      "price": 现价（数字。不知道填 null）',
+    '      "weightPct": 仓位占比百分数（数字，如 12.3。不知道填 null）',
+    '      "pnlPct": 盈亏百分比（数字，如 -1.2。不知道填 null）',
+    "    }",
+    "  ],",
+    '  "summary": {',
+    '    "overview": "一句话概述组合特征",',
+    '    "totalPositions": 持仓数量,',
+    '    "topHolding": "第一大持仓名称",',
+    '    "estimatedPnlPct": 组合估算盈亏百分比或 null',
+    "  },",
+    '  "warnings": ["不确定的字段说明，无则为空数组"]',
+    "}",
+    "",
+    "## 字段说明",
+    "- code 只能是证券代码（如 600000、AAPL），绝对不能把市值、金额、占比填进 code。",
+    "- 持仓金额填 marketValue，持仓占比填 weightPct，盈亏比例填 pnlPct。",
+    "- 如果截图里某字段看不清，填 null 或 \"\"，并在 warnings 中说明。",
+    "- 如果某条记录完全无法识别，就不要放入 holdings。",
+    ""
   ].join("\n");
 
   if (provider === "anthropic") {
@@ -114,6 +149,8 @@ async function callOpenAICompatible(apiUrl, apiKey, model, mime, base64, prompt)
 
   const body = JSON.stringify({
     model,
+    temperature: 0,
+    max_tokens: 4096,
     response_format: { type: "json_object" },
     messages: [{
       role: "user",
@@ -172,10 +209,16 @@ async function callOpenAICompatible(apiUrl, apiKey, model, mime, base64, prompt)
     throw error;
   }
 
-  const content = data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
-  log("模型 content 前500字", String(content || "").slice(0, 500));
+  const choice = data.choices && data.choices[0];
+  const content = choice && choice.message && choice.message.content;
+  const finishReason = (choice && choice.finish_reason) || "unknown";
 
-  return extractJson(content);
+  log("content length", String((content || "").length));
+  log("finish_reason", finishReason);
+  log("模型 content 前500字", String(content || "").slice(0, 500));
+  log("模型 content 后500字", String(content || "").slice(-500));
+
+  return extractJson(content, finishReason);
 }
 
 async function callAnthropic(apiUrl, apiKey, model, mime, base64, prompt) {
@@ -192,7 +235,7 @@ async function callAnthropic(apiUrl, apiKey, model, mime, base64, prompt) {
       },
       body: JSON.stringify({
         model,
-        max_tokens: 2048,
+        max_tokens: 4096,
         messages: [{
           role: "user",
           content: [
@@ -238,8 +281,12 @@ async function callAnthropic(apiUrl, apiKey, model, mime, base64, prompt) {
     throw error;
   }
   const text = Array.isArray(data.content) ? data.content.map(part => part.text || "").join("\n") : "";
+  const finishReason = data.stop_reason || "unknown";
+  log("content length (Anthropic)", String((text || "").length));
+  log("finish_reason (Anthropic)", finishReason);
   log("模型 content 前500字 (Anthropic)", String(text || "").slice(0, 500));
-  return extractJson(text);
+  log("模型 content 后500字 (Anthropic)", String(text || "").slice(-500));
+  return extractJson(text, finishReason);
 }
 
 function normalizeOpenAIEndpoint(url) {
@@ -256,11 +303,14 @@ function normalizeAnthropicEndpoint(url) {
   return `${trimmed}/v1/messages`;
 }
 
-function extractJson(text) {
+function extractJson(text, finishReason) {
   if (!text) {
-    const error = new Error("模型返回内容无法解析为持仓数据");
+    const error = new Error("模型返回内容无法解析为完整 JSON");
     error.statusCode = 422;
     error.rawPreview = "(空内容)";
+    error.rawTail = "(空)";
+    error.parseError = "content 为空";
+    error.finishReason = finishReason || "unknown";
     throw error;
   }
 
@@ -271,22 +321,47 @@ function extractJson(text) {
   const fenced = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/i);
   if (fenced) {
     cleaned = fenced[1].trim();
+    log("JSON 提取", "从 markdown 代码块中提取");
   }
 
-  // 找到第一个 { 和对应的 }
+  // 找到第一个 {
   const start = cleaned.indexOf("{");
   if (start < 0) {
-    const error = new Error("模型返回内容无法解析为持仓数据");
+    const error = new Error("模型返回内容无法解析为完整 JSON");
     error.statusCode = 422;
     error.rawPreview = raw.slice(0, 500);
+    error.rawTail = raw.slice(-500);
+    error.parseError = "内容中没有找到 {";
+    error.finishReason = finishReason || "unknown";
     throw error;
   }
 
-  // 从 start 开始，匹配完整的 JSON 对象
+  // 从 start 开始，匹配完整的 JSON 对象（跳过字符串内的括号）
   let depth = 0;
+  let inString = false;
+  let escape = false;
   let end = -1;
+
   for (let i = start; i < cleaned.length; i++) {
     const ch = cleaned[i];
+
+    if (escape) {
+      escape = false;
+      continue;
+    }
+
+    if (ch === "\\" && inString) {
+      escape = true;
+      continue;
+    }
+
+    if (ch === '"' && !escape) {
+      inString = !inString;
+      continue;
+    }
+
+    if (inString) continue;
+
     if (ch === "{") depth++;
     else if (ch === "}") {
       depth--;
@@ -295,40 +370,78 @@ function extractJson(text) {
   }
 
   if (end < 0) {
-    const error = new Error("模型返回内容无法解析为持仓数据");
+    const truncated = finishReason === "length" || finishReason === "max_tokens";
+    const error = new Error(truncated
+      ? "模型输出可能被截断，JSON 不完整"
+      : "模型返回内容无法解析为完整 JSON");
     error.statusCode = 422;
     error.rawPreview = raw.slice(0, 500);
+    error.rawTail = raw.slice(-500);
+    error.parseError = truncated
+      ? `finish_reason=${finishReason}，JSON 括号未闭合（开 ${depth} 层）`
+      : `JSON 括号未闭合（开 ${depth} 层）`;
+    error.finishReason = finishReason || "unknown";
     throw error;
   }
 
+  const jsonStr = cleaned.slice(start, end + 1);
   let parsed;
   try {
-    parsed = JSON.parse(cleaned.slice(start, end + 1));
-  } catch {
-    const error = new Error("模型返回内容无法解析为持仓数据");
+    parsed = JSON.parse(jsonStr);
+  } catch (parseErr) {
+    const truncated = finishReason === "length" || finishReason === "max_tokens";
+    const probablyTruncated = parseErr.message && parseErr.message.includes("end of");
+    const error = new Error(truncated || probablyTruncated
+      ? "模型输出可能被截断，JSON 不完整"
+      : "模型返回内容无法解析为完整 JSON");
     error.statusCode = 422;
     error.rawPreview = raw.slice(0, 500);
+    error.rawTail = raw.slice(-500);
+    error.parseError = parseErr.message || "JSON.parse 失败";
+    error.finishReason = finishReason || "unknown";
     throw error;
   }
 
+  log("JSON 解析", "成功");
   return parsed;
 }
 
 function sanitizeResult(raw) {
   const holdings = Array.isArray(raw && raw.holdings) ? raw.holdings : [];
+  const validationWarnings = [];
   const safeHoldings = holdings
-    .map(item => ({
-      name: stripText(item.name || item.stockName || item.securityName || "未命名", 40),
-      code: stripText(item.code || item.symbol || "", 20),
-      weightPct: clampNumber(item.weightPct ?? item.pct ?? item.weight_pct ?? item.positionPct, 0, 100),
-      pnlPct: clampNumber(item.pnlPct ?? item.change ?? item.pnl_pct ?? item.profitPct, -1000, 1000),
-      sector: stripText(item.sector || item.market || "其他", 20)
-    }))
+    .map((item, index) => {
+      const rawCode = String(item.code || item.symbol || "");
+      const validCode = stripText(rawCode, 20);
+      // 检测 code 字段是否被误填为金额
+      if (/^\d{1,3}(,\d{3})*(\.\d+)?$/.test(rawCode) && parseFloat(rawCode.replace(/,/g, "")) > 100) {
+        validationWarnings.push(`第${index + 1}个持仓的 code 字段"${rawCode}"疑似为金额而非证券代码`);
+      }
+      return {
+        name: stripText(item.name || item.stockName || item.securityName || "未命名", 40),
+        code: validCode,
+        market: stripText(item.market || "", 12),
+        assetClass: stripText(item.assetClass || "", 12),
+        sector: stripText(item.sector || item.market || "其他", 20),
+        weightPct: clampNumber(item.weightPct ?? item.pct ?? item.weight_pct ?? item.positionPct, 0, 100),
+        pnlPct: clampNumber(item.pnlPct ?? item.change ?? item.pnl_pct ?? item.profitPct, -1000, 1000),
+        marketValue: safeNumber(item.marketValue),
+        cost: safeNumber(item.cost),
+        price: safeNumber(item.price)
+      };
+    })
     .filter(item => (item.name && item.name !== "未命名") || item.code)
     .slice(0, 50);
 
   const summary = raw && raw.summary && typeof raw.summary === "object" ? raw.summary : {};
   const estimatedPnl = Number(summary.estimatedPnlPct);
+
+  if (validationWarnings.length) {
+    log("字段验证 warnings", validationWarnings.join("; "));
+  }
+
+  const rawWarnings = Array.isArray(raw && raw.warnings) ? raw.warnings : [];
+  const mergedWarnings = [...validationWarnings, ...rawWarnings.map(item => stripText(item, 100)).filter(Boolean)].slice(0, 8);
 
   return {
     holdings: safeHoldings,
@@ -338,8 +451,14 @@ function sanitizeResult(raw) {
       topHolding: stripText(summary.topHolding || (safeHoldings[0] && safeHoldings[0].name) || "", 40),
       estimatedPnlPct: Number.isFinite(estimatedPnl) ? estimatedPnl : estimatePnl(safeHoldings)
     },
-    warnings: Array.isArray(raw && raw.warnings) ? raw.warnings.map(item => stripText(item, 100)).filter(Boolean).slice(0, 8) : []
+    warnings: mergedWarnings
   };
+}
+
+function safeNumber(value) {
+  if (value === null || value === undefined) return null;
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
 }
 
 function stripText(value, maxLength) {

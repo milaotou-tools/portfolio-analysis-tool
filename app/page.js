@@ -205,7 +205,14 @@ export default function HomePage() {
         if (data.cause) msg += ` (${data.cause})`;
         if (data.rawPreview) {
           msg += " | 模型原始输出见下方调试信息";
-          setDebugInfo({ topKeys: "(解析失败)", holdingsCount: "0", rawPreview: data.rawPreview });
+          setDebugInfo({
+            topKeys: "(解析失败)",
+            holdingsCount: "0",
+            rawPreview: data.rawPreview || "",
+            rawTail: data.rawTail || "",
+            parseError: data.parseError || "",
+            finishReason: data.finishReason || ""
+          });
         }
         throw new Error(msg);
       }
@@ -256,10 +263,18 @@ export default function HomePage() {
               <div className="card" style={{ marginTop: 14 }}>
                 <div className="card-title">调试信息（仅开发环境可见）</div>
                 <div style={{ fontSize: 12, color: "#8b949e", display: "grid", gap: 6 }}>
+                  {debugInfo.finishReason && <div>finish_reason：<code>{debugInfo.finishReason}</code></div>}
+                  {debugInfo.parseError && <div>JSON 解析错误：<code style={{ color: "#f85149" }}>{debugInfo.parseError}</code></div>}
                   <div>response 顶层字段：{debugInfo.topKeys}</div>
                   <div>holdings 数量：{debugInfo.holdingsCount}</div>
                   <div>原始输出（前500字）：</div>
-                  <pre style={{ background: "#161b22", padding: 10, borderRadius: 6, fontSize: 11, color: "#e6edf3", overflow: "auto", maxHeight: 200, whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{debugInfo.rawPreview}</pre>
+                  <pre style={{ background: "#161b22", padding: 10, borderRadius: 6, fontSize: 11, color: "#e6edf3", overflow: "auto", maxHeight: 160, whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{debugInfo.rawPreview}</pre>
+                  {debugInfo.rawTail && (
+                    <>
+                      <div>原始输出（后500字）：</div>
+                      <pre style={{ background: "#161b22", padding: 10, borderRadius: 6, fontSize: 11, color: "#e6edf3", overflow: "auto", maxHeight: 160, whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{debugInfo.rawTail}</pre>
+                    </>
+                  )}
                 </div>
               </div>
             )}
