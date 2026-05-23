@@ -1,54 +1,33 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Chart, ArcElement, DoughnutController, Tooltip, Legend } from "chart.js";
-import HoldingTreemap from "../components/HoldingTreemap";
+import MarketHoldingsPanel from "../components/MarketHoldingsPanel";
+import SectorOverviewPanel from "../components/SectorOverviewPanel";
 import ShareCardPanel from "../components/ShareCardPanel";
 import UploadPanel from "../components/UploadPanel";
 import { DEMO_RESULT } from "../lib/demoData";
 import { clientLog, fileLogDetail } from "../lib/clientLog";
-import { normalizeResult } from "../lib/holdings";
+import { normalizeResult, splitHoldingsByMarket } from "../lib/holdings";
 
-Chart.register(DoughnutController, ArcElement, Tooltip, Legend);
-
-const CHART_COLORS = ["#c65355", "#23865f", "#c9a44a", "#4d83c8", "#8b6fc9", "#5aa0a8", "#9a7650", "#7c8794"];
+const MAX_UPLOAD_FILES = 2;
 
 export default function HomePage() {
   const [page, setPage] = useState("upload");
-  const [file, setFile] = useState(null);
-  const [previewUrl, setPreviewUrl] = useState("");
+  const [files, setFiles] = useState([]);
+  const [previewUrls, setPreviewUrls] = useState([]);
   const [result, setResult] = useState(null);
-  const [isDemo, setIsDemo] = useState(false);
   const [isParsing, setIsParsing] = useState(false);
-  const [holdingView, setHoldingView] = useState("heatmap");
-  const [viewportMode, setViewportMode] = useState("desktop");
   const [parseStatus, setParseStatus] = useState("");
   const [toast, setToast] = useState(null);
   const [debugInfo, setDebugInfo] = useState(null);
-  const chartRef = useRef(null);
-  const canvasRef = useRef(null);
+  const notifyTimerRef = useRef(null);
 
   useEffect(() => {
     return () => {
-      if (previewUrl) URL.revokeObjectURL(previewUrl);
+      previewUrls.forEach(url => URL.revokeObjectURL(url));
+      if (notifyTimerRef.current) window.clearTimeout(notifyTimerRef.current);
     };
-  }, [previewUrl]);
-
-  useEffect(() => {
-    function updateViewportMode() {
-      const landscapePhone = window.innerWidth <= 920 && window.innerHeight <= 560 && window.innerWidth > window.innerHeight;
-      const portraitPhone = window.innerWidth <= 760 && window.innerHeight >= window.innerWidth;
-      setViewportMode(landscapePhone ? "phone-landscape" : portraitPhone ? "phone-portrait" : "desktop");
-    }
-
-    updateViewportMode();
-    window.addEventListener("resize", updateViewportMode);
-    window.addEventListener("orientationchange", updateViewportMode);
-    return () => {
-      window.removeEventListener("resize", updateViewportMode);
-      window.removeEventListener("orientationchange", updateViewportMode);
-    };
-  }, []);
+  }, [previewUrls]);
 
   useEffect(() => {
     const raw =
@@ -56,6 +35,7 @@ export default function HomePage() {
       window.localStorage.getItem("holdingNativeUploadResult") ||
       readNativeUploadCookie();
     const params = new URLSearchParams(window.location.search);
+
     window.sessionStorage.removeItem("holdingNativeUploadResult");
     window.localStorage.removeItem("holdingNativeUploadResult");
     clearNativeUploadCookie();
@@ -74,8 +54,8 @@ export default function HomePage() {
     try {
       const payload = JSON.parse(raw);
       if (payload && payload.ok) {
-        setParseStatus("原生上传解析完成，正在生成持仓图。");
-        receiveResult(payload.data, false);
+        setParseStatus("原生上传解析完成，正在生成持仓视图。");
+        receiveResult(payload.data);
         notify("解析完成", "ok");
       } else {
         const message = (payload && payload.error) || "原生上传解析失败。";
@@ -88,157 +68,154 @@ export default function HomePage() {
     }
   }, []);
 
-  useEffect(() => {
-    if (!result || holdingView !== "chart" || !canvasRef.current) return;
-    if (chartRef.current) chartRef.current.destroy();
-
-    const compactChart = viewportMode === "phone-landscape";
-    chartRef.current = new Chart(canvasRef.current, {
-      type: "doughnut",
-      data: {
-        labels: result.holdings.map(item => item.name),
-        datasets: [{
-          data: result.holdings.map(item => item.weightPct),
-          backgroundColor: result.holdings.map((_, index) => CHART_COLORS[index % CHART_COLORS.length]),
-          borderColor: "#0c1219",
-          borderWidth: compactChart ? 2 : 3,
-          hoverOffset: compactChart ? 2 : 5
-        }]
-      },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        cutout: compactChart ? "58%" : "62%",
-        radius: compactChart ? "92%" : "90%",
-        layout: {
-          padding: compactChart
-            ? { top: 0, right: 2, bottom: 0, left: 2 }
-            : { top: 4, right: 6, bottom: 0, left: 6 }
-        },
-        plugins: {
-          legend: {
-            display: false,
-            position: compactChart ? "right" : "bottom",
-            labels: {
-              color: "#e6edf3",
-              boxWidth: compactChart ? 10 : 12,
-              boxHeight: compactChart ? 10 : 12,
-              padding: compactChart ? 8 : 14,
-              font: { size: compactChart ? 11 : 12, weight: "700" }
-            }
-          },
-          tooltip: {
-            callbacks: {
-              label: ctx => ` ${ctx.label}: ${ctx.parsed.toFixed(1)}%`
-            }
-          }
-        }
-      }
-    });
-
-    return () => {
-      if (chartRef.current) chartRef.current.destroy();
-      chartRef.current = null;
-    };
-  }, [result, holdingView, viewportMode]);
-
   function notify(message, type = "") {
     setToast({ message, type });
-    window.clearTimeout(notify.timer);
-    notify.timer = window.setTimeout(() => setToast(null), 2600);
+    if (notifyTimerRef.current) window.clearTimeout(notifyTimerRef.current);
+    notifyTimerRef.current = window.setTimeout(() => setToast(null), 2600);
   }
 
-  function handleFile(nextFile) {
-    const error = validateImage(nextFile);
-    if (error) {
-      clientLog("page.handleFile.invalid", fileLogDetail(nextFile, { message: error }));
-      notify(error, "err");
+  function handleFiles(nextFiles) {
+    const selected = normalizeFileInput(nextFiles);
+    if (!selected.length) {
+      setParseStatus("请先选择 1 到 2 张截图。");
+      notify("请先选择 1 到 2 张截图。", "err");
       return;
     }
-    if (previewUrl) URL.revokeObjectURL(previewUrl);
-    setFile(nextFile);
-    setPreviewUrl(URL.createObjectURL(nextFile));
-    setParseStatus("已选择截图，可以开始解析。");
-    clientLog("page.handleFile.accepted", fileLogDetail(nextFile));
-    notify("截图已选择", "ok");
+
+    const valid = [];
+    for (const file of selected) {
+      const error = validateImage(file);
+      if (error) {
+        clientLog("page.handleFile.invalid", fileLogDetail(file, { message: error }));
+        notify(error, "err");
+        continue;
+      }
+      valid.push(file);
+    }
+
+    if (!valid.length) {
+      setParseStatus("请选择 PNG、JPG、WebP 或 HEIC 图片。");
+      return;
+    }
+
+    if (selected.length > MAX_UPLOAD_FILES) {
+      notify("最多只能上传两张图，已保留前两张。", "ok");
+    }
+
+    setPreviewUrls(prev => {
+      prev.forEach(url => URL.revokeObjectURL(url));
+      return valid.map(file => URL.createObjectURL(file));
+    });
+    setFiles(valid);
+    setParseStatus(valid.length > 1 ? "已选择两张截图，可以开始解析。" : "已选择截图，可以开始解析。");
+    valid.forEach(file => clientLog("page.handleFile.accepted", fileLogDetail(file)));
+    notify(valid.length > 1 ? "已选择两张截图" : "截图已选择", "ok");
   }
 
-  function receiveResult(raw, demo = false) {
+  function receiveResult(raw) {
     const normalized = normalizeResult(raw);
     if (!normalized.holdings.length) {
-      setParseStatus("接口已返回，但未识别到可生成图表的持仓数据");
+      setParseStatus("接口已返回，但没有识别到可生成图表的持仓数据。");
       setDebugInfo({
-        topKeys: Object.keys(raw || {}).join(", ") || "(无)",
+        topKeys: Object.keys(raw || {}).join(", ") || "(空)",
         holdingsCount: String(normalized.holdings.length),
         rawPreview: JSON.stringify(raw || {}).slice(0, 500)
       });
-      notify("未识别到持仓数据，请换一张更清晰的截图。", "err");
+      notify("没有识别到持仓数据，请换一张更清晰的截图。", "err");
       return;
     }
+
+    const buckets = splitHoldingsByMarket(normalized.holdings);
+    const nextPage = buckets.cn.length ? "cn" : buckets.us.length ? "us" : "sector";
+
     setResult(normalized);
-    setIsDemo(demo);
     setDebugInfo(null);
     setParseStatus("");
-    setPage("result");
+    setPage(nextPage);
   }
 
-  async function parseScreenshot(nextFile = file) {
-    const error = validateImage(nextFile);
-    if (error) {
-      notify(error, "err");
+  async function parseScreenshot(nextFiles = files) {
+    const fileList = normalizeFileInput(nextFiles);
+    if (!fileList.length) {
+      notify("请先选择 1 到 2 张截图。", "err");
       return;
     }
 
     setDebugInfo(null);
     setIsParsing(true);
-    setParseStatus("正在上传截图并调用视觉模型，请稍等。");
-    clientLog("page.parse.start", fileLogDetail(nextFile));
+    setParseStatus(
+      fileList.length > 1
+        ? "正在上传两张截图并合并结果，请稍等。"
+        : "正在上传截图并调用视觉模型，请稍等。"
+    );
+
     try {
-      const form = new FormData();
-      form.append("screenshot", nextFile, nextFile.name || "holding-screenshot.png");
-      const resp = await fetch("/api/parse-holdings", { method: "POST", body: form });
-      const data = await resp.json().catch(() => ({}));
-      clientLog("page.parse.response", { ok: resp.ok, status: String(resp.status) });
-      if (!resp.ok) {
-        let msg = data.error || `解析失败 (${resp.status})`;
-        if (data.detail) msg += ` — ${data.detail}`;
-        if (data.cause) msg += ` (${data.cause})`;
-        if (data.rawPreview) {
-          msg += " | 模型原始输出见下方调试信息";
-          setDebugInfo({
-            topKeys: "(解析失败)",
-            holdingsCount: "0",
-            rawPreview: data.rawPreview || "",
-            rawTail: data.rawTail || "",
-            parseError: data.parseError || "",
-            finishReason: data.finishReason || ""
-          });
+      clientLog("page.parse.start", {
+        count: fileList.length,
+        files: fileList.map(file => fileLogDetail(file))
+      });
+
+      const parsedResults = [];
+      for (let index = 0; index < fileList.length; index += 1) {
+        const file = fileList[index];
+        setParseStatus(
+          fileList.length > 1
+            ? `正在解析第 ${index + 1}/${fileList.length} 张截图：${file.name || "截图"}`
+            : "正在解析截图，请稍等。"
+        );
+
+        try {
+          const data = await parseSingleScreenshot(file, index, fileList.length);
+          parsedResults.push(normalizeResult(data));
+        } catch (error) {
+          if (error.debugInfo) {
+            setDebugInfo(error.debugInfo);
+          }
+          const name = file.name || `第 ${index + 1} 张截图`;
+          throw new Error(`${name}：${error.message || "解析失败"}`);
         }
-        throw new Error(msg);
       }
-      setParseStatus("模型已返回结果，正在生成持仓图。");
-      receiveResult(data, false);
-      notify("解析完成", "ok");
+
+      const merged = mergeParsedResults(parsedResults);
+      setParseStatus(
+        fileList.length > 1
+          ? "两张截图都已解析完成，正在生成合并结果。"
+          : "模型已返回结果，正在生成持仓视图。"
+      );
+      receiveResult(merged);
+      notify(fileList.length > 1 ? "两张截图解析完成" : "解析完成", "ok");
     } catch (error) {
-      const message = error.message || "解析失败，请稍后再试";
+      const message = error.message || "解析失败，请稍后再试。";
       setParseStatus(message);
-      clientLog("page.parse.error", { message });
+      if (error.debugInfo) {
+        setDebugInfo(error.debugInfo);
+      }
+      clientLog("page.parse.error", { message, count: fileList.length });
       notify(message, "err");
     } finally {
       setIsParsing(false);
     }
   }
 
+  const hasResult = Boolean(result && result.holdings && result.holdings.length);
 
   return (
     <>
       <nav className="nav" aria-label="主导航">
         {[
           ["upload", "上传"],
-          ["result", "持仓"],
+          ["cn", "A股"],
+          ["us", "美股"],
+          ["sector", "板块"],
           ["share", "分享"]
         ].map(([key, label]) => (
-          <button key={key} className={`nav-btn ${page === key ? "active" : ""}`} onClick={() => setPage(key)}>
+          <button
+            key={key}
+            className={`nav-btn ${page === key ? "active" : ""}`}
+            onClick={() => setPage(key)}
+            disabled={!hasResult && key !== "upload"}
+            type="button"
+          >
             {label}
           </button>
         ))}
@@ -248,14 +225,14 @@ export default function HomePage() {
         {page === "upload" && (
           <>
             <UploadPanel
-              file={file}
-              previewUrl={previewUrl}
+              files={files}
+              previewUrls={previewUrls}
               isParsing={isParsing}
-              onFile={handleFile}
+              onFiles={handleFiles}
               onParse={parseScreenshot}
               parseStatus={parseStatus}
               onDemo={() => {
-                receiveResult(DEMO_RESULT, true);
+                receiveResult(DEMO_RESULT);
                 notify("已加载示例结果", "ok");
               }}
             />
@@ -263,15 +240,15 @@ export default function HomePage() {
               <div className="card" style={{ marginTop: 14 }}>
                 <div className="card-title">调试信息（仅开发环境可见）</div>
                 <div style={{ fontSize: 12, color: "#8b949e", display: "grid", gap: 6 }}>
-                  {debugInfo.finishReason && <div>finish_reason：<code>{debugInfo.finishReason}</code></div>}
-                  {debugInfo.parseError && <div>JSON 解析错误：<code style={{ color: "#f85149" }}>{debugInfo.parseError}</code></div>}
-                  <div>response 顶层字段：{debugInfo.topKeys}</div>
-                  <div>holdings 数量：{debugInfo.holdingsCount}</div>
-                  <div>原始输出（前500字）：</div>
+                  {debugInfo.finishReason && <div>finish_reason: <code>{debugInfo.finishReason}</code></div>}
+                  {debugInfo.parseError && <div>JSON 解析错误: <code style={{ color: "#f85149" }}>{debugInfo.parseError}</code></div>}
+                  <div>response 顶层字段: {debugInfo.topKeys}</div>
+                  <div>holdings 数量: {debugInfo.holdingsCount}</div>
+                  <div>原始输出（前500字）:</div>
                   <pre style={{ background: "#161b22", padding: 10, borderRadius: 6, fontSize: 11, color: "#e6edf3", overflow: "auto", maxHeight: 160, whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{debugInfo.rawPreview}</pre>
                   {debugInfo.rawTail && (
                     <>
-                      <div>原始输出（后500字）：</div>
+                      <div>原始输出（后500字）:</div>
                       <pre style={{ background: "#161b22", padding: 10, borderRadius: 6, fontSize: 11, color: "#e6edf3", overflow: "auto", maxHeight: 160, whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{debugInfo.rawTail}</pre>
                     </>
                   )}
@@ -281,75 +258,30 @@ export default function HomePage() {
           </>
         )}
 
-        {page === "result" && (
-          <section className="page active">
-            <div className="card holdings-card">
-              <div className="card-title">
-                <span>{holdingView === "heatmap" ? "持仓热力图" : "仓位占比"}</span>
-                <div className="view-switch" role="tablist" aria-label="持仓图表切换">
-                  <button
-                    type="button"
-                    className={holdingView === "heatmap" ? "active" : ""}
-                    onClick={() => setHoldingView("heatmap")}
-                  >
-                    热力图
-                  </button>
-                  <button
-                    type="button"
-                    className={holdingView === "chart" ? "active" : ""}
-                    onClick={() => setHoldingView("chart")}
-                  >
-                    占比
-                  </button>
-                </div>
-              </div>
+        {page === "cn" && (
+          <MarketHoldingsPanel
+            holdings={result?.holdings || []}
+            marketGroup="cn"
+            title="A股持仓"
+            description="和原来的持仓页一样，显示热力图和仓位占比，只筛选 A 股。"
+          />
+        )}
 
-              {holdingView === "heatmap" ? (
-                <HoldingTreemap holdings={result?.holdings || []} />
-              ) : (
-                <div className="allocation-view">
-                  <div className="chart-holder">
-                    <canvas ref={canvasRef} />
-                    <div className="chart-center">
-                      <span>持仓</span>
-                      <strong>{result?.holdings?.length || 0}</strong>
-                    </div>
-                  </div>
-                  <div className="allocation-list" aria-label="仓位占比图注">
-                    {(result?.holdings || []).slice(0, 8).map((item, index) => (
-                      <div className="allocation-row" key={`${item.code}-${item.name}`}>
-                        <span
-                          className="allocation-swatch"
-                          style={{ backgroundColor: CHART_COLORS[index % CHART_COLORS.length] }}
-                          aria-hidden="true"
-                        />
-                        <span className="allocation-name">{item.name}</span>
-                        <span className="allocation-weight">{item.weightPct.toFixed(1)}%</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-              <div className="holdings-view-controls">
-                <div className="view-switch" role="tablist" aria-label="鎸佷粨鍥捐〃鍒囨崲">
-                  <button
-                    type="button"
-                    className={holdingView === "heatmap" ? "active" : ""}
-                    onClick={() => setHoldingView("heatmap")}
-                  >
-                    鐑姏鍥?
-                  </button>
-                  <button
-                    type="button"
-                    className={holdingView === "chart" ? "active" : ""}
-                    onClick={() => setHoldingView("chart")}
-                  >
-                    鍗犳瘮
-                  </button>
-                </div>
-              </div>
-            </div>
-          </section>
+        {page === "us" && (
+          <MarketHoldingsPanel
+            holdings={result?.holdings || []}
+            marketGroup="us"
+            title="美股持仓"
+            description="和 A 股持仓页保持同样的展示方式，只显示美股持仓。"
+          />
+        )}
+
+        {page === "sector" && (
+          <SectorOverviewPanel
+            holdings={result?.holdings || []}
+            title="A股 + 美股板块总览"
+            description="用环状图先看各板块总价值，金额统一按人民币折算；点击某个板块后，在右侧展开这个板块里的具体股票和对应价值。"
+          />
         )}
 
         {page === "share" && (
@@ -362,8 +294,74 @@ export default function HomePage() {
   );
 }
 
+async function parseSingleScreenshot(nextFile, index, total) {
+  const error = validateImage(nextFile);
+  if (error) {
+    throw new Error(error);
+  }
+
+  clientLog("page.parse.file", fileLogDetail(nextFile, { index: index + 1, total }));
+
+  const form = new FormData();
+  form.append("screenshot", nextFile, nextFile.name || `holding-screenshot-${index + 1}.png`);
+
+  const resp = await fetch("/api/parse-holdings", { method: "POST", body: form });
+  const data = await resp.json().catch(() => ({}));
+
+  clientLog("page.parse.response", {
+    ok: resp.ok,
+    status: String(resp.status),
+    index: String(index + 1),
+    total: String(total)
+  });
+
+  if (!resp.ok) {
+    let msg = data.error || `解析失败 (${resp.status})`;
+    if (data.detail) msg += ` - ${data.detail}`;
+    if (data.cause) msg += ` (${data.cause})`;
+    const error = new Error(data.rawPreview ? `${msg} | 模型原始输出见下方调试信息` : msg);
+    if (data.rawPreview) {
+      error.debugInfo = {
+        topKeys: "(解析失败)",
+        holdingsCount: "0",
+        rawPreview: data.rawPreview || "",
+        rawTail: data.rawTail || "",
+        parseError: data.parseError || "",
+        finishReason: data.finishReason || ""
+      };
+    }
+    throw error;
+  }
+
+  return data;
+}
+
+function mergeParsedResults(results) {
+  const holdings = [];
+  const warnings = [];
+
+  for (const item of results) {
+    if (Array.isArray(item?.holdings)) holdings.push(...item.holdings);
+    if (Array.isArray(item?.warnings)) warnings.push(...item.warnings);
+  }
+
+  return {
+    holdings,
+    warnings
+  };
+}
+
+function normalizeFileInput(input) {
+  if (!input) return [];
+  if (Array.isArray(input)) return input.filter(Boolean).slice(0, MAX_UPLOAD_FILES);
+  if (typeof FileList !== "undefined" && input instanceof FileList) {
+    return Array.from(input).filter(Boolean).slice(0, MAX_UPLOAD_FILES);
+  }
+  return [input].filter(Boolean).slice(0, MAX_UPLOAD_FILES);
+}
+
 function validateImage(file) {
-  if (!file) return "请选择一张截图。";
+  if (!file) return "请选择 1 到 2 张截图。";
   if (!isSupportedImage(file)) return "请选择 PNG、JPG、WebP 或 HEIC 图片。";
   if (file.size > 10 * 1024 * 1024) return "图片太大了，请压缩到 10MB 以内再上传。";
   return "";
@@ -378,6 +376,7 @@ function isSupportedImage(file) {
 function readNativeUploadCookie() {
   const match = document.cookie.match(/(?:^|;\s*)holdingNativeUploadResult=([^;]+)/);
   if (!match) return "";
+
   try {
     const base64 = match[1].replace(/-/g, "+").replace(/_/g, "/");
     const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);

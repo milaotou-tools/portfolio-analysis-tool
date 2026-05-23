@@ -28,7 +28,11 @@ Thumbs.db
 .env.local
 
 .vercel
+chrome-profile/
+tmp/
 
 # Temporary visual annotation exports
 /holdings-page-visual-map.png
 /holdings-page-visual-map.svg
+
+.vercel

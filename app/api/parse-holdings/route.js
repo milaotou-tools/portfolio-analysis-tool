@@ -1,6 +1,12 @@
+import dns from "node:dns";
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
+
+try {
+  dns.setDefaultResultOrder("ipv4first");
+} catch {}
 
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 
@@ -45,6 +51,7 @@ export async function POST(request) {
     if (error.finishReason) body.finishReason = error.finishReason;
     if (error.detail) body.detail = error.detail;
     if (error.causeDetail) body.cause = error.causeDetail;
+    if (error.endpointHint) body.endpointHint = error.endpointHint;
     return json(body, status);
   }
 }
@@ -89,9 +96,9 @@ function log(label, value) {
 }
 
 async function callVisionModel(file) {
-  const apiKey = process.env.AI_API_KEY;
+  const apiKey = (process.env.AI_API_KEY || process.env.DASHSCOPE_API_KEY || "").trim();
   const model = process.env.AI_MODEL || DEFAULT_MODEL;
-  const apiUrl = process.env.AI_BASE_URL || BASE_URL;
+  const apiUrl = (process.env.AI_BASE_URL || BASE_URL).trim();
   const provider = (process.env.AI_PROVIDER || "openai").toLowerCase();
 
   log("AI_BASE_URL", apiUrl);
@@ -167,9 +174,6 @@ async function callVisionModel(file) {
 }
 
 async function callOpenAICompatible(apiUrl, apiKey, model, mime, base64, prompt) {
-  const url = normalizeOpenAIEndpoint(apiUrl);
-  log("请求 URL", url);
-
   const body = JSON.stringify({
     model,
     temperature: 0,
@@ -184,13 +188,17 @@ async function callOpenAICompatible(apiUrl, apiKey, model, mime, base64, prompt)
     }]
   });
 
-  const doFetch = async () => {
+  const urls = buildOpenAIEndpointCandidates(apiUrl);
+  log("请求 URL 候选", urls.join(" | "));
+
+  const doFetch = async (url) => {
     const resp = await fetch(url, {
       method: "POST",
       headers: {
         "authorization": `Bearer ${apiKey}`,
         "content-type": "application/json"
       },
+      signal: AbortSignal.timeout(30000),
       body
     });
     const data = await resp.json().catch(() => ({}));
@@ -202,11 +210,20 @@ async function callOpenAICompatible(apiUrl, apiKey, model, mime, base64, prompt)
 
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const result = await doFetch();
-      resp = result.resp;
-      data = result.data;
-      lastError = null;
-      break;
+      for (const url of urls) {
+        try {
+          const result = await doFetch(url);
+          resp = result.resp;
+          data = result.data;
+          lastError = null;
+          log("本次命中 URL", url);
+          break;
+        } catch (err) {
+          lastError = err;
+          log(`请求失败 (${url})`, err.message);
+        }
+      }
+      if (!lastError) break;
     } catch (err) {
       lastError = err;
       log(`第${attempt + 1}次请求失败`, err.message);
@@ -223,6 +240,7 @@ async function callOpenAICompatible(apiUrl, apiKey, model, mime, base64, prompt)
     error.statusCode = 502;
     error.detail = lastError.message;
     error.causeDetail = lastError.cause?.message || "";
+    error.endpointHint = urls.join(" | ");
     throw error;
   }
 
@@ -329,6 +347,46 @@ function normalizeOpenAIEndpoint(url) {
   if (trimmed.endsWith("/chat/completions")) return trimmed;
   if (trimmed.endsWith("/v1")) return `${trimmed}/chat/completions`;
   return `${trimmed}/v1/chat/completions`;
+}
+
+function buildOpenAIEndpointCandidates(url) {
+  const normalized = normalizeOpenAIEndpoint(url);
+  const parsed = safeUrl(normalized);
+  if (!parsed) return [normalized];
+
+  const urls = [normalized];
+  const host = parsed.hostname.toLowerCase();
+
+  const regionalHosts = {
+    "dashscope.aliyuncs.com": [
+      "dashscope-us.aliyuncs.com",
+      "dashscope-intl.aliyuncs.com"
+    ],
+    "dashscope-us.aliyuncs.com": [
+      "dashscope.aliyuncs.com",
+      "dashscope-intl.aliyuncs.com"
+    ],
+    "dashscope-intl.aliyuncs.com": [
+      "dashscope-us.aliyuncs.com",
+      "dashscope.aliyuncs.com"
+    ]
+  };
+
+  for (const nextHost of regionalHosts[host] || []) {
+    const next = new URL(parsed.toString());
+    next.hostname = nextHost;
+    urls.push(next.toString().replace(/\/$/, ""));
+  }
+
+  return [...new Set(urls)];
+}
+
+function safeUrl(url) {
+  try {
+    return new URL(url);
+  } catch {
+    return null;
+  }
 }
 
 function normalizeAnthropicEndpoint(url) {
@@ -568,7 +626,7 @@ function buildSummaryOverview(holdings) {
 
 function safeNumber(value) {
   if (value === null || value === undefined) return null;
-  const num = Number(value);
+  const num = parseFlexibleNumber(value);
   return Number.isFinite(num) ? num : null;
 }
 
@@ -577,7 +635,7 @@ function stripText(value, maxLength) {
 }
 
 function clampNumber(value, min, max) {
-  const num = Number(value);
+  const num = parseFlexibleNumber(value);
   if (!Number.isFinite(num)) return 0;
   return Math.min(max, Math.max(min, num));
 }
@@ -585,4 +643,20 @@ function clampNumber(value, min, max) {
 function estimatePnl(holdings) {
   const total = holdings.reduce((sum, item) => sum + item.weightPct, 0) || 1;
   return holdings.reduce((sum, item) => sum + item.pnlPct * item.weightPct / total, 0);
+}
+
+function parseFlexibleNumber(value) {
+  if (value === null || value === undefined || value === "") return NaN;
+  if (typeof value === "number") return value;
+
+  const text = String(value).trim();
+  if (!text) return NaN;
+
+  const normalized = text
+    .replace(/[￥¥$,\s]/g, "")
+    .replace(/^\((.*)\)$/, "-$1")
+    .replace(/[^\d.-]/g, "");
+
+  const num = Number(normalized);
+  return Number.isFinite(num) ? num : NaN;
 }
